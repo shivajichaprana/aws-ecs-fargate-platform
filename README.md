@@ -27,6 +27,7 @@ networking, secret injection, and safe progressive rollouts.
 | `providers.tf` | AWS provider configuration and default tags |
 | `variables.tf` | Root input variables (region, naming, environment, tags) |
 | `modules/ecs-cluster/` | ECS cluster with Fargate capacity providers and Container Insights |
+| `modules/service/` | Reusable service: task definition, ALB target group, and target-tracking autoscaling |
 
 Additional modules (service, networking, and deployment) are layered on top of
 the cluster foundation.
