@@ -57,3 +57,13 @@ output "listener_rule_arn" {
   description = "ARN of the ALB listener rule, when one is created."
   value       = local.create_listener_rule ? aws_lb_listener_rule.this[0].arn : null
 }
+
+output "service_connect_enabled" {
+  description = "Whether the service is registered into a Service Connect namespace."
+  value       = local.enable_service_connect
+}
+
+output "service_connect_endpoint" {
+  description = "Service Connect client endpoint (alias:port) peers use to reach the service, or null when Service Connect is disabled."
+  value       = local.enable_service_connect ? "${local.service_connect_alias}:${local.service_connect_dns_port}" : null
+}

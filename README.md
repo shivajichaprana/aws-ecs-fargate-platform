@@ -28,6 +28,7 @@ networking, secret injection, and safe progressive rollouts.
 | `variables.tf` | Root input variables (region, naming, environment, tags) |
 | `modules/ecs-cluster/` | ECS cluster with Fargate capacity providers and Container Insights |
 | `modules/service/` | Reusable service: task definition, ALB target group, and target-tracking autoscaling |
+| `modules/service-connect/` | Cloud Map namespace for ECS Service Connect service discovery |
 
 Additional modules (service, networking, and deployment) are layered on top of
 the cluster foundation.

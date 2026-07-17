@@ -67,6 +67,12 @@ variable "kms_key_arn" {
   default     = null
 }
 
+variable "service_connect_namespace_arn" {
+  description = "Optional Service Connect (Cloud Map) namespace ARN to set as the cluster default. When null, no cluster-level Service Connect default is configured."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Additional tags applied to cluster resources."
   type        = map(string)

@@ -20,6 +20,10 @@ belongs to.
   ALB security group on the container port.
 - Least-privilege IAM roles (execution + task). The task role gains only the SSM
   messaging permissions required for ECS Exec, and only when Exec is enabled.
+- Optional ECS Service Connect registration: a named port mapping, a client
+  alias, and proxy logging, so peers reach the service by a short alias over an
+  encrypted mesh. The execution role gains scoped read access to the specific
+  Secrets Manager secrets and SSM parameters injected into the task definition.
 - `aws_appautoscaling_target` plus target-tracking policies on CPU, and optionally
   memory and ALB request count per target.
 
@@ -56,6 +60,39 @@ module "checkout" {
   max_capacity         = 20
   cpu_target_value     = 60
   request_count_target = 1000
+}
+```
+
+Register the service into a Service Connect namespace and inject credentials
+from Secrets Manager and SSM Parameter Store:
+
+```hcl
+module "checkout" {
+  source = "../../modules/service"
+
+  name_prefix  = "ecs-platform"
+  service_name = "checkout"
+  environment  = "prod"
+
+  cluster_arn  = module.cluster.cluster_arn
+  cluster_name = module.cluster.cluster_name
+  vpc_id       = var.vpc_id
+  subnet_ids   = var.private_subnet_ids
+
+  container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/checkout:1.4.2"
+  container_port  = 8080
+
+  # Join the mesh; peers reach this service at http://checkout:8080.
+  service_connect_namespace = module.service_connect.namespace_arn
+
+  # Inject credentials at launch instead of baking them into the image.
+  container_secrets = [
+    { name = "DB_PASSWORD", value_from = var.db_password_secret_arn },
+    { name = "API_KEY", value_from = var.api_key_parameter_arn },
+  ]
+  secrets_manager_secret_arns = [var.db_password_secret_arn]
+  ssm_parameter_arns          = [var.api_key_parameter_arn]
+  secrets_kms_key_arns        = [var.secrets_kms_key_arn]
 }
 ```
 
@@ -108,6 +145,18 @@ module "checkout" {
 | `request_count_target` | `number` | `null` | Target requests per task (null disables). |
 | `scale_in_cooldown` | `number` | `300` | Scale-in cooldown (seconds). |
 | `scale_out_cooldown` | `number` | `60` | Scale-out cooldown (seconds). |
+| `service_connect_namespace` | `string` | `null` | Cloud Map namespace ARN/name; enables Service Connect when set. |
+| `service_connect_alias` | `string` | `null` | Alias peers use to reach the service (defaults to `service_name`). |
+| `service_connect_discovery_name` | `string` | `null` | Discovery name in the namespace (defaults to `service_name`). |
+| `service_connect_port_name` | `string` | `null` | Named port mapping exposed via Service Connect (defaults to `service_name`). |
+| `service_connect_dns_port` | `number` | `null` | Client alias port (defaults to `container_port`). |
+| `service_connect_app_protocol` | `string` | `http` | `http`, `http2`, or `grpc`. |
+| `service_connect_peer_security_group_id` | `string` | `null` | Peer SG allowed east-west to the container port. |
+| `enable_service_connect_logs` | `bool` | `true` | Stream Service Connect proxy logs to the log group. |
+| `container_secrets` | `list(object)` | `[]` | Secrets injected as env vars (`name`, `value_from`). |
+| `secrets_manager_secret_arns` | `list(string)` | `[]` | Secrets Manager ARNs the execution role may read. |
+| `ssm_parameter_arns` | `list(string)` | `[]` | SSM parameter ARNs the execution role may read. |
+| `secrets_kms_key_arns` | `list(string)` | `[]` | KMS keys the execution role may use to decrypt secrets. |
 | `tags` | `map(string)` | `{}` | Extra tags. |
 
 ## Outputs
@@ -126,3 +175,5 @@ module "checkout" {
 | `log_group_name` | Container log group name. |
 | `autoscaling_target_resource_id` | Application Auto Scaling resource id. |
 | `listener_rule_arn` | Listener rule ARN (or null). |
+| `service_connect_enabled` | Whether the service joined a Service Connect namespace. |
+| `service_connect_endpoint` | Client endpoint `alias:port` for peers (or null). |

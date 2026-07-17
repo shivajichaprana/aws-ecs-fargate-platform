@@ -27,3 +27,8 @@ output "exec_kms_key_arn" {
   description = "KMS key ARN used for ECS Exec session encryption, if enabled."
   value       = local.exec_kms_key_arn
 }
+
+output "service_connect_namespace_arn" {
+  description = "Service Connect namespace ARN set as the cluster default, if any."
+  value       = var.service_connect_namespace_arn
+}

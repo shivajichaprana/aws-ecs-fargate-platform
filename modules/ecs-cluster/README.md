@@ -12,6 +12,8 @@ Insights, and an encrypted, auditable ECS Exec trail.
   `FARGATE_SPOT` with a configurable default strategy.
 - An optional module-managed KMS key (with rotation) and CloudWatch log group
   for ECS Exec, created only when a key is not supplied.
+- An optional Service Connect default: when a namespace ARN is supplied, the
+  cluster sets it as the default so services join the mesh without restating it.
 
 ## Usage
 
@@ -43,6 +45,7 @@ module "cluster" {
 | `enable_execute_command_logging` | `bool` | `true` | Encrypt and audit ECS Exec sessions. |
 | `log_retention_in_days` | `number` | `90` | ECS Exec log retention. |
 | `kms_key_arn` | `string` | `null` | Bring-your-own KMS key; module creates one when null. |
+| `service_connect_namespace_arn` | `string` | `null` | Optional Service Connect namespace ARN set as the cluster default. |
 | `tags` | `map(string)` | `{}` | Extra tags. |
 
 ## Outputs
@@ -55,3 +58,4 @@ module "cluster" {
 | `capacity_providers` | Associated capacity providers. |
 | `exec_log_group_name` | ECS Exec audit log group name (or null). |
 | `exec_kms_key_arn` | ECS Exec encryption key ARN (or null). |
+| `service_connect_namespace_arn` | Cluster default Service Connect namespace ARN (or null). |

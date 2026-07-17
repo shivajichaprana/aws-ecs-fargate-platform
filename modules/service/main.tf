@@ -3,9 +3,11 @@
 # Packages the resources needed to run one containerized service on an existing
 # Fargate cluster: a CloudWatch-logged task definition, an ECS service wired to
 # an ALB target group, a task security group, least-privilege IAM roles, and
-# target-tracking autoscaling on CPU, memory, and ALB request count. The input
-# surface is deliberately small so a service can be onboarded by supplying an
-# image, a port, and the cluster and network it belongs to.
+# target-tracking autoscaling on CPU, memory, and ALB request count. The service
+# can register into a Service Connect namespace for private service-to-service
+# discovery and inject configuration from Secrets Manager and SSM Parameter Store
+# at launch. The input surface is deliberately small so a service can be onboarded
+# by supplying an image, a port, and the cluster and network it belongs to.
 
 data "aws_region" "current" {}
 
@@ -25,6 +27,26 @@ locals {
 
   create_listener_rule = var.alb_listener_arn != null
 
+  # Service Connect is enabled whenever a namespace is supplied. The port mapping
+  # is named so the Service Connect service can reference it, and the client alias
+  # defaults to the service name and container port so callers reach the service
+  # at http://<service_name>:<port> without a load balancer or resolvable DNS.
+  enable_service_connect         = var.service_connect_namespace != null
+  service_connect_port_name      = coalesce(var.service_connect_port_name, var.service_name)
+  service_connect_discovery_name = coalesce(var.service_connect_discovery_name, var.service_name)
+  service_connect_alias          = coalesce(var.service_connect_alias, var.service_name)
+  service_connect_dns_port       = coalesce(var.service_connect_dns_port, var.container_port)
+
+  # A scoped read policy is attached to a module-managed execution role only when
+  # at least one secret source ARN is supplied. The three source lists map to the
+  # services the execution role may need to reach to resolve injected secrets:
+  # Secrets Manager, SSM Parameter Store, and the KMS key that decrypts them.
+  create_secrets_policy = local.create_execution_role && (
+    length(var.secrets_manager_secret_arns) > 0 ||
+    length(var.ssm_parameter_arns) > 0 ||
+    length(var.secrets_kms_key_arns) > 0
+  )
+
   container_health_check = length(var.container_health_check.command) > 0 ? {
     command     = var.container_health_check.command
     interval    = var.container_health_check.interval
@@ -33,23 +55,32 @@ locals {
     startPeriod = var.container_health_check.start_period
   } : null
 
-  # Single-container definition. Optional keys (command, healthCheck) are merged
-  # in only when set so the rendered JSON never carries null fields, which keeps
-  # the task definition stable across plans. Non-sensitive configuration is
-  # passed as environment variables; credentials are injected as secrets by the
-  # caller.
+  # Port mapping. The Service Connect name and application protocol are added only
+  # when a namespace is configured, so the rendered task definition is unchanged
+  # for services that do not use Service Connect.
+  port_mapping = merge(
+    {
+      containerPort = var.container_port
+      protocol      = "tcp"
+    },
+    local.enable_service_connect ? {
+      name        = local.service_connect_port_name
+      appProtocol = var.service_connect_app_protocol
+    } : {},
+  )
+
+  # Single-container definition. Optional keys (command, healthCheck, secrets) are
+  # merged in only when set so the rendered JSON never carries null fields, which
+  # keeps the task definition stable across plans. Non-sensitive configuration is
+  # passed as environment variables; credentials are injected as secrets sourced
+  # from Secrets Manager or SSM Parameter Store, never baked into the image.
   container_definition = merge(
     {
       name      = local.container_name
       image     = var.container_image
       essential = true
 
-      portMappings = [
-        {
-          containerPort = var.container_port
-          protocol      = "tcp"
-        },
-      ]
+      portMappings = [local.port_mapping]
 
       environment = [
         for key, value in var.container_environment : {
@@ -69,6 +100,14 @@ locals {
     },
     length(var.container_command) > 0 ? { command = var.container_command } : {},
     local.container_health_check != null ? { healthCheck = local.container_health_check } : {},
+    length(var.container_secrets) > 0 ? {
+      secrets = [
+        for s in var.container_secrets : {
+          name      = s.name
+          valueFrom = s.value_from
+        }
+      ]
+    } : {},
   )
 
   # Valid Fargate memory values for each CPU size, used to reject invalid pairs
@@ -135,6 +174,52 @@ resource "aws_iam_role_policy_attachment" "execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Secret injection: allow the execution role to read only the specific Secrets
+# Manager secrets and SSM parameters wired into the task definition, and to
+# decrypt them with the supplied KMS keys. Attached only when the module manages
+# the execution role and at least one source ARN is supplied.
+data "aws_iam_policy_document" "secrets" {
+  count = local.create_secrets_policy ? 1 : 0
+
+  dynamic "statement" {
+    for_each = length(var.secrets_manager_secret_arns) > 0 ? [1] : []
+    content {
+      sid       = "ReadSecretsManager"
+      effect    = "Allow"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = var.secrets_manager_secret_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.ssm_parameter_arns) > 0 ? [1] : []
+    content {
+      sid       = "ReadSsmParameters"
+      effect    = "Allow"
+      actions   = ["ssm:GetParameter", "ssm:GetParameters"]
+      resources = var.ssm_parameter_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.secrets_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid       = "DecryptSecrets"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = var.secrets_kms_key_arns
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "secrets" {
+  count = local.create_secrets_policy ? 1 : 0
+
+  name   = "secrets-injection"
+  role   = aws_iam_role.execution[0].id
+  policy = data.aws_iam_policy_document.secrets[0].json
+}
+
 # Task role: assumed by the application. Starts empty; application permissions
 # are attached by the caller.
 resource "aws_iam_role" "task" {
@@ -194,6 +279,23 @@ resource "aws_vpc_security_group_ingress_rule" "from_alb" {
   security_group_id            = aws_security_group.task.id
   description                  = "Allow ALB to reach the container port."
   referenced_security_group_id = var.alb_security_group_id
+  from_port                    = var.container_port
+  to_port                      = var.container_port
+  ip_protocol                  = "tcp"
+
+  tags = local.base_tags
+}
+
+# Allow peer services in the same Service Connect namespace to reach the
+# container port. Created only when Service Connect is enabled and a peer
+# security group is supplied, keeping east-west access scoped to a security
+# group rather than an open CIDR.
+resource "aws_vpc_security_group_ingress_rule" "from_mesh" {
+  count = local.enable_service_connect && var.service_connect_peer_security_group_id != null ? 1 : 0
+
+  security_group_id            = aws_security_group.task.id
+  description                  = "Allow Service Connect peers to reach the container port."
+  referenced_security_group_id = var.service_connect_peer_security_group_id
   from_port                    = var.container_port
   to_port                      = var.container_port
   ip_protocol                  = "tcp"
@@ -303,16 +405,20 @@ resource "aws_ecs_task_definition" "this" {
       condition     = contains(lookup(local.fargate_cpu_memory, var.cpu, []), var.memory)
       error_message = "memory is not a valid Fargate value for the selected cpu. See the Fargate task size matrix."
     }
+    precondition {
+      condition     = length(var.container_secrets) == 0 || !local.create_execution_role || (length(var.secrets_manager_secret_arns) + length(var.ssm_parameter_arns)) > 0
+      error_message = "When container_secrets are set and the module manages the execution role, provide secrets_manager_secret_arns and/or ssm_parameter_arns so the execution role can read them."
+    }
   }
 }
 
 # --- Service ------------------------------------------------------------------
 
 resource "aws_ecs_service" "this" {
-  name            = local.base_name
-  cluster         = var.cluster_arn
-  task_definition = aws_ecs_task_definition.this.arn
-  desired_count   = var.desired_count
+  name             = local.base_name
+  cluster          = var.cluster_arn
+  task_definition  = aws_ecs_task_definition.this.arn
+  desired_count    = var.desired_count
   platform_version = var.platform_version
 
   enable_execute_command            = var.enable_execute_command
@@ -349,6 +455,39 @@ resource "aws_ecs_service" "this" {
     target_group_arn = aws_lb_target_group.this.arn
     container_name   = local.container_name
     container_port   = var.container_port
+  }
+
+  # Register the service into the Service Connect namespace so peers can reach it
+  # by its client alias over the encrypted mesh. Proxy logs are streamed to the
+  # service log group by default for traffic observability.
+  dynamic "service_connect_configuration" {
+    for_each = local.enable_service_connect ? [1] : []
+    content {
+      enabled   = true
+      namespace = var.service_connect_namespace
+
+      service {
+        port_name      = local.service_connect_port_name
+        discovery_name = local.service_connect_discovery_name
+
+        client_alias {
+          port     = local.service_connect_dns_port
+          dns_name = local.service_connect_alias
+        }
+      }
+
+      dynamic "log_configuration" {
+        for_each = var.enable_service_connect_logs ? [1] : []
+        content {
+          log_driver = "awslogs"
+          options = {
+            "awslogs-group"         = aws_cloudwatch_log_group.this.name
+            "awslogs-region"        = data.aws_region.current.name
+            "awslogs-stream-prefix" = "service-connect"
+          }
+        }
+      }
+    }
   }
 
   tags = local.base_tags

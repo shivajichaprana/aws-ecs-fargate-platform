@@ -65,6 +65,16 @@ resource "aws_ecs_cluster" "this" {
     value = var.container_insights
   }
 
+  # Make a Service Connect namespace the cluster default so services can join the
+  # mesh without each restating it. Backward-compatible: when no namespace is
+  # supplied, no default is configured.
+  dynamic "service_connect_defaults" {
+    for_each = var.service_connect_namespace_arn != null ? [1] : []
+    content {
+      namespace = var.service_connect_namespace_arn
+    }
+  }
+
   # Encrypt and (optionally) record ECS Exec sessions so interactive access to
   # running tasks is auditable.
   dynamic "configuration" {

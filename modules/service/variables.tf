@@ -343,6 +343,100 @@ variable "scale_out_cooldown" {
   default     = 60
 }
 
+# --- Service Connect ----------------------------------------------------------
+
+variable "service_connect_namespace" {
+  description = "Cloud Map namespace ARN (or name) for ECS Service Connect. When null, Service Connect is disabled and the service is reachable only through its load balancer."
+  type        = string
+  default     = null
+}
+
+variable "service_connect_alias" {
+  description = "DNS alias peers use to reach this service over Service Connect (for example checkout). When null, defaults to service_name."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.service_connect_alias == null || can(regex("^[a-z][a-z0-9-]{0,62}$", coalesce(var.service_connect_alias, "x")))
+    error_message = "service_connect_alias must be a lowercase hostname label starting with a letter, up to 63 characters."
+  }
+}
+
+variable "service_connect_discovery_name" {
+  description = "Discovery name registered in the namespace, unique within it. When null, defaults to service_name."
+  type        = string
+  default     = null
+}
+
+variable "service_connect_port_name" {
+  description = "Name of the container port mapping exposed through Service Connect. When null, defaults to service_name."
+  type        = string
+  default     = null
+}
+
+variable "service_connect_dns_port" {
+  description = "Port the Service Connect client alias listens on. When null, defaults to container_port."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.service_connect_dns_port == null || (coalesce(var.service_connect_dns_port, 1) > 0 && coalesce(var.service_connect_dns_port, 1) <= 65535)
+    error_message = "service_connect_dns_port must be between 1 and 65535."
+  }
+}
+
+variable "service_connect_app_protocol" {
+  description = "Application protocol advertised for the Service Connect port mapping: http, http2, or grpc."
+  type        = string
+  default     = "http"
+
+  validation {
+    condition     = contains(["http", "http2", "grpc"], var.service_connect_app_protocol)
+    error_message = "service_connect_app_protocol must be one of: http, http2, grpc."
+  }
+}
+
+variable "service_connect_peer_security_group_id" {
+  description = "Optional security group of Service Connect peers allowed to reach the container port east-west. When set, an ingress rule references it instead of an open CIDR."
+  type        = string
+  default     = null
+}
+
+variable "enable_service_connect_logs" {
+  description = "Stream Service Connect proxy logs to the container log group for east-west traffic observability."
+  type        = bool
+  default     = true
+}
+
+# --- Secret injection ---------------------------------------------------------
+
+variable "container_secrets" {
+  description = "Secrets injected into the container as environment variables at launch. value_from is the ARN of a Secrets Manager secret (optionally with a :json-key:: suffix) or an SSM Parameter Store parameter."
+  type = list(object({
+    name       = string
+    value_from = string
+  }))
+  default = []
+}
+
+variable "secrets_manager_secret_arns" {
+  description = "Secrets Manager secret ARNs the module-managed execution role may read to inject container secrets. List base secret ARNs (without any JSON-key suffix)."
+  type        = list(string)
+  default     = []
+}
+
+variable "ssm_parameter_arns" {
+  description = "SSM Parameter Store parameter ARNs the module-managed execution role may read to inject container secrets."
+  type        = list(string)
+  default     = []
+}
+
+variable "secrets_kms_key_arns" {
+  description = "KMS key ARNs used to decrypt SecureString SSM parameters or encrypted Secrets Manager secrets. Grants kms:Decrypt to the module-managed execution role."
+  type        = list(string)
+  default     = []
+}
+
 variable "tags" {
   description = "Additional tags applied to all service resources."
   type        = map(string)
