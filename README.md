@@ -16,8 +16,9 @@ networking, secret injection, and safe progressive rollouts.
   encrypted service-to-service traffic without exposing internal endpoints.
 - **Configuration and secrets** — Secrets Manager and SSM Parameter Store values
   injected into task definitions at launch rather than baked into images.
-- **Safe rollouts** — CodeDeploy blue/green deployments with a deployment circuit
-  breaker and automatic rollback on failed health checks.
+- **Safe rollouts** — in-place deployments guarded by a circuit breaker, or
+  blue/green traffic shifting with a test listener, canary and linear shift
+  configurations, and automatic rollback on alarm.
 
 ## Repository layout
 
@@ -29,9 +30,10 @@ networking, secret injection, and safe progressive rollouts.
 | `modules/ecs-cluster/` | ECS cluster with Fargate capacity providers and Container Insights |
 | `modules/service/` | Reusable service: task definition, ALB target group, and target-tracking autoscaling |
 | `modules/service-connect/` | Cloud Map namespace for ECS Service Connect service discovery |
+| `modules/blue-green/` | Blue/green traffic shifting, deployment gating, and rollback alarms |
 
-Additional modules (service, networking, and deployment) are layered on top of
-the cluster foundation.
+The service, networking, and deployment modules are layered on top of the cluster
+foundation and compose with one another.
 
 ## Requirements
 

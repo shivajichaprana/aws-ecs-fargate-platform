@@ -1,11 +1,11 @@
 output "service_name" {
   description = "Name of the ECS service."
-  value       = aws_ecs_service.this.name
+  value       = local.ecs_service_name
 }
 
 output "service_id" {
   description = "ARN/ID of the ECS service."
-  value       = aws_ecs_service.this.id
+  value       = local.ecs_service_id
 }
 
 output "task_definition_arn" {
@@ -26,6 +26,36 @@ output "target_group_arn" {
 output "target_group_arn_suffix" {
   description = "ARN suffix of the target group, useful for CloudWatch metrics and request-count scaling."
   value       = aws_lb_target_group.this.arn_suffix
+}
+
+output "target_group_name" {
+  description = "Name of the target group serving production traffic."
+  value       = aws_lb_target_group.this.name
+}
+
+output "green_target_group_arn" {
+  description = "ARN of the replacement target group used by traffic-shifting rollouts, or null for in-place rollouts."
+  value       = one(aws_lb_target_group.green[*].arn)
+}
+
+output "green_target_group_arn_suffix" {
+  description = "ARN suffix of the replacement target group, used as a CloudWatch alarm dimension during a rollout."
+  value       = one(aws_lb_target_group.green[*].arn_suffix)
+}
+
+output "green_target_group_name" {
+  description = "Name of the replacement target group, or null for in-place rollouts."
+  value       = one(aws_lb_target_group.green[*].name)
+}
+
+output "container_name" {
+  description = "Container name the load balancer routes to, required to render a deployment AppSpec."
+  value       = local.container_name
+}
+
+output "deployment_controller_type" {
+  description = "Rollout mode the service was created with."
+  value       = var.deployment_controller_type
 }
 
 output "security_group_id" {

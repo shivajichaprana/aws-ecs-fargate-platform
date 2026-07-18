@@ -1,0 +1,15 @@
+# Deployment specification consumed by the deployment pipeline.
+#
+# The task definition placeholder is substituted with the revision to roll out at
+# deploy time, which keeps image promotion in the delivery pipeline rather than
+# in infrastructure state.
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "${task_definition_placeholder}"
+        LoadBalancerInfo:
+          ContainerName: "${container_name}"
+          ContainerPort: ${container_port}
+        PlatformVersion: "${platform_version}"

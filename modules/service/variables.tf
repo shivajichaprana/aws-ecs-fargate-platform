@@ -265,20 +265,31 @@ variable "enable_execute_command" {
   default     = true
 }
 
+variable "deployment_controller_type" {
+  description = "Rollout mode. ECS replaces tasks in place behind a circuit breaker; CODE_DEPLOY creates a second target group and hands traffic shifting to an external deployment controller."
+  type        = string
+  default     = "ECS"
+
+  validation {
+    condition     = contains(["ECS", "CODE_DEPLOY"], var.deployment_controller_type)
+    error_message = "deployment_controller_type must be ECS or CODE_DEPLOY."
+  }
+}
+
 variable "enable_deployment_circuit_breaker" {
-  description = "Roll back automatically when a rolling deployment fails to stabilize."
+  description = "Roll back automatically when a rolling deployment fails to stabilize. Applies only to in-place rollouts."
   type        = bool
   default     = true
 }
 
 variable "deployment_minimum_healthy_percent" {
-  description = "Lower bound on healthy tasks during a rolling deployment."
+  description = "Lower bound on healthy tasks during a rolling deployment. Applies only to in-place rollouts."
   type        = number
   default     = 100
 }
 
 variable "deployment_maximum_percent" {
-  description = "Upper bound on running tasks during a rolling deployment."
+  description = "Upper bound on running tasks during a rolling deployment. Applies only to in-place rollouts."
   type        = number
   default     = 200
 }

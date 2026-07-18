@@ -12,9 +12,13 @@ belongs to.
   logging to a dedicated CloudWatch log group, a configurable runtime platform,
   and an optional container health check. Invalid CPU/memory pairs are rejected
   by a precondition before the API sees them.
-- `aws_ecs_service` — wired to the target group, with a rolling deployment guarded
-  by a circuit breaker and automatic rollback. Autoscaling owns `desired_count`.
-- `aws_lb_target_group` (target type `ip`) and an optional `aws_lb_listener_rule`
+- `aws_ecs_service` — wired to the target group, in one of two rollout modes.
+  In-place rollouts replace tasks gradually behind a circuit breaker that rolls
+  back a deployment which never stabilizes. Traffic-shifting rollouts hand the
+  active revision and traffic routing to an external deployment controller.
+  Autoscaling owns `desired_count` in both modes.
+- `aws_lb_target_group` (target type `ip`), plus a second replacement target
+  group for traffic-shifting rollouts, and an optional `aws_lb_listener_rule`
   with host-header and/or path-pattern conditions.
 - `aws_security_group` for the task ENIs, allowing inbound traffic only from the
   ALB security group on the container port.
@@ -96,6 +100,54 @@ module "checkout" {
 }
 ```
 
+## Rollout modes
+
+`deployment_controller_type` selects how new revisions reach production.
+
+| | `ECS` (default) | `CODE_DEPLOY` |
+|---|---|---|
+| Rollout | Tasks replaced in place within healthy-percent bounds | Replacement task set created, then traffic shifted |
+| Target groups | One | Two — production and replacement |
+| Rollback | Circuit breaker, after the deployment fails to stabilize | Traffic swap back, immediately |
+| Pre-production validation | None | Optional test listener |
+| Routing | Listener rule with host/path conditions | Dedicated listener owned by the deployment module |
+| Revision owned by | Terraform | The delivery pipeline |
+
+Traffic shifting swaps a listener's default action between the two target
+groups, so it needs a listener dedicated to the service. Listener rules stay
+pinned to a single target group and are therefore created only for in-place
+rollouts; setting `alb_listener_arn` alongside `CODE_DEPLOY` is rejected by a
+precondition. Pair that mode with the [`blue-green`](../blue-green) module, which
+owns the listeners, the traffic-shifting configuration, and the rollback alarms:
+
+```hcl
+module "checkout" {
+  source = "../../modules/service"
+
+  # ... identity, cluster, network, and container inputs ...
+
+  deployment_controller_type = "CODE_DEPLOY"
+  alb_security_group_id      = var.alb_security_group_id
+}
+
+module "checkout_deploy" {
+  source = "../../modules/blue-green"
+
+  cluster_name     = module.cluster.cluster_name
+  ecs_service_name = module.checkout.service_name
+
+  blue_target_group_name  = module.checkout.target_group_name
+  green_target_group_name = module.checkout.green_target_group_name
+  container_name          = module.checkout.container_name
+  container_port          = 8080
+
+  # ... listener and rollback-alarm inputs ...
+}
+```
+
+Switching an existing service between modes replaces it, because the two modes
+declare different lifecycle rules and cannot share one resource.
+
 ## Inputs
 
 | Name | Type | Default | Description |
@@ -134,9 +186,10 @@ module "checkout" {
 | `capacity_provider_strategy` | `list(object)` | `[]` | Optional Spot/on-demand strategy. |
 | `health_check_grace_period_seconds` | `number` | `60` | Health check grace period. |
 | `enable_execute_command` | `bool` | `true` | Enable ECS Exec. |
-| `enable_deployment_circuit_breaker` | `bool` | `true` | Roll back failed rolling deploys. |
-| `deployment_minimum_healthy_percent` | `number` | `100` | Min healthy tasks during deploy. |
-| `deployment_maximum_percent` | `number` | `200` | Max running tasks during deploy. |
+| `deployment_controller_type` | `string` | `ECS` | Rollout mode: `ECS` in place, or `CODE_DEPLOY` traffic shifting. |
+| `enable_deployment_circuit_breaker` | `bool` | `true` | Roll back failed in-place deploys. |
+| `deployment_minimum_healthy_percent` | `number` | `100` | Min healthy tasks during an in-place deploy. |
+| `deployment_maximum_percent` | `number` | `200` | Max running tasks during an in-place deploy. |
 | `additional_security_group_ids` | `list(string)` | `[]` | Extra task security groups. |
 | `min_capacity` | `number` | `2` | Autoscaling floor. |
 | `max_capacity` | `number` | `10` | Autoscaling ceiling. |
@@ -169,6 +222,12 @@ module "checkout" {
 | `task_definition_family` | Task definition family name. |
 | `target_group_arn` | Target group ARN. |
 | `target_group_arn_suffix` | Target group ARN suffix. |
+| `target_group_name` | Name of the target group serving production traffic. |
+| `green_target_group_arn` | Replacement target group ARN (null for in-place rollouts). |
+| `green_target_group_arn_suffix` | Replacement target group ARN suffix. |
+| `green_target_group_name` | Replacement target group name (null for in-place rollouts). |
+| `container_name` | Container name the load balancer routes to. |
+| `deployment_controller_type` | Rollout mode the service was created with. |
 | `security_group_id` | Task security group ID. |
 | `task_role_arn` | Application task role ARN. |
 | `execution_role_arn` | Task execution role ARN. |

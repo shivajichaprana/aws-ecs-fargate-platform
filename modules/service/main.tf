@@ -8,6 +8,13 @@
 # discovery and inject configuration from Secrets Manager and SSM Parameter Store
 # at launch. The input surface is deliberately small so a service can be onboarded
 # by supplying an image, a port, and the cluster and network it belongs to.
+#
+# Rollouts run in one of two modes. The default replaces tasks in place, guarded
+# by a deployment circuit breaker that rolls back a deployment which never
+# stabilizes. Setting the deployment controller to CODE_DEPLOY instead creates a
+# second target group and hands rollouts to an external deployment controller,
+# which shifts traffic between the two groups and keeps the previous task set
+# available for an immediate rollback.
 
 data "aws_region" "current" {}
 
@@ -19,13 +26,28 @@ locals {
   # with a hyphen.
   target_group_name = trim(substr(local.base_name, 0, 32), "-")
 
+  # An external deployment controller owns traffic shifting and the active task
+  # definition revision, so the service is declared differently in that mode.
+  use_code_deploy = var.deployment_controller_type == "CODE_DEPLOY"
+
+  # Traffic shifting needs two distinctly named target groups. The stem is capped
+  # so both suffixed names stay inside the 32-character limit and can never
+  # collide after truncation.
+  target_group_stem       = trim(substr(local.base_name, 0, 26), "-")
+  blue_target_group_name  = local.use_code_deploy ? "${local.target_group_stem}-blue" : local.target_group_name
+  green_target_group_name = "${local.target_group_stem}-green"
+
   create_execution_role = var.task_execution_role_arn == null
   create_task_role      = var.task_role_arn == null
 
   execution_role_arn = local.create_execution_role ? aws_iam_role.execution[0].arn : var.task_execution_role_arn
   task_role_arn      = local.create_task_role ? aws_iam_role.task[0].arn : var.task_role_arn
 
-  create_listener_rule = var.alb_listener_arn != null
+  # A forwarding rule pins a listener to one target group, which conflicts with a
+  # controller that swaps the listener between two of them. Rules are therefore
+  # created only for in-place rollouts; traffic-shifting rollouts route through
+  # dedicated listeners owned by the deployment module.
+  create_listener_rule = var.alb_listener_arn != null && !local.use_code_deploy
 
   # Service Connect is enabled whenever a namespace is supplied. The port mapping
   # is named so the Service Connect service can reference it, and the client alias
@@ -312,10 +334,13 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   tags = local.base_tags
 }
 
-# --- Target group -------------------------------------------------------------
+# --- Target groups ------------------------------------------------------------
 
+# Serves production traffic. Under an external deployment controller this is the
+# group traffic starts on, and the controller swaps the listener between it and
+# the replacement group.
 resource "aws_lb_target_group" "this" {
-  name        = local.target_group_name
+  name        = local.blue_target_group_name
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
@@ -335,6 +360,38 @@ resource "aws_lb_target_group" "this" {
   }
 
   tags = local.base_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Replacement group used by traffic-shifting rollouts. It carries no targets
+# between deployments; the deployment controller registers the new task set into
+# it, validates health, then moves production traffic across.
+resource "aws_lb_target_group" "green" {
+  count = local.use_code_deploy ? 1 : 0
+
+  name        = local.green_target_group_name
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  deregistration_delay = var.deregistration_delay
+
+  health_check {
+    enabled             = true
+    path                = var.health_check_path
+    matcher             = var.health_check_matcher
+    protocol            = "HTTP"
+    healthy_threshold   = 3
+    unhealthy_threshold = 3
+    interval            = 15
+    timeout             = 5
+  }
+
+  tags = merge(local.base_tags, { Name = local.green_target_group_name })
 
   lifecycle {
     create_before_destroy = true
@@ -414,7 +471,17 @@ resource "aws_ecs_task_definition" "this" {
 
 # --- Service ------------------------------------------------------------------
 
-resource "aws_ecs_service" "this" {
+# The two rollout modes need different, statically declared lifecycle rules, so
+# each is its own resource and exactly one is created. Reference the service
+# through local.ecs_service_name and local.ecs_service_id rather than either
+# resource directly.
+
+# In-place rollout. Tasks are replaced gradually within the healthy-percent
+# bounds, and the circuit breaker rolls the deployment back if the new tasks
+# never reach a steady state.
+resource "aws_ecs_service" "rolling" {
+  count = local.use_code_deploy ? 0 : 1
+
   name             = local.base_name
   cluster          = var.cluster_arn
   task_definition  = aws_ecs_task_definition.this.arn
@@ -500,11 +567,116 @@ resource "aws_ecs_service" "this" {
   depends_on = [aws_lb_target_group.this]
 }
 
+# Traffic-shifting rollout. An external deployment controller registers each new
+# task set, moves production traffic between the two target groups, and keeps the
+# previous task set available so a rollback is a traffic swap. Because that
+# controller owns the active revision and the target group the service points at,
+# both attributes are left out of Terraform's control after creation; the healthy
+# percent bounds and circuit breaker do not apply to this mode and are omitted.
+resource "aws_ecs_service" "blue_green" {
+  count = local.use_code_deploy ? 1 : 0
+
+  name             = local.base_name
+  cluster          = var.cluster_arn
+  task_definition  = aws_ecs_task_definition.this.arn
+  desired_count    = var.desired_count
+  platform_version = var.platform_version
+
+  enable_execute_command            = var.enable_execute_command
+  health_check_grace_period_seconds = var.health_check_grace_period_seconds
+
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
+
+  # Use the launch type unless the caller supplies a capacity provider strategy
+  # (for example to bias steady-state capacity toward Spot).
+  launch_type = length(var.capacity_provider_strategy) == 0 ? "FARGATE" : null
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.capacity_provider_strategy
+    content {
+      capacity_provider = capacity_provider_strategy.value.capacity_provider
+      base              = capacity_provider_strategy.value.base
+      weight            = capacity_provider_strategy.value.weight
+    }
+  }
+
+  network_configuration {
+    subnets          = var.subnet_ids
+    security_groups  = concat([aws_security_group.task.id], var.additional_security_group_ids)
+    assign_public_ip = var.assign_public_ip
+  }
+
+  # Starting target group. The deployment controller swaps this to the
+  # replacement group as traffic shifts.
+  load_balancer {
+    target_group_arn = aws_lb_target_group.this.arn
+    container_name   = local.container_name
+    container_port   = var.container_port
+  }
+
+  # Register the service into the Service Connect namespace so peers can reach it
+  # by its client alias over the encrypted mesh. Proxy logs are streamed to the
+  # service log group by default for traffic observability.
+  dynamic "service_connect_configuration" {
+    for_each = local.enable_service_connect ? [1] : []
+    content {
+      enabled   = true
+      namespace = var.service_connect_namespace
+
+      service {
+        port_name      = local.service_connect_port_name
+        discovery_name = local.service_connect_discovery_name
+
+        client_alias {
+          port     = local.service_connect_dns_port
+          dns_name = local.service_connect_alias
+        }
+      }
+
+      dynamic "log_configuration" {
+        for_each = var.enable_service_connect_logs ? [1] : []
+        content {
+          log_driver = "awslogs"
+          options = {
+            "awslogs-group"         = aws_cloudwatch_log_group.this.name
+            "awslogs-region"        = data.aws_region.current.name
+            "awslogs-stream-prefix" = "service-connect"
+          }
+        }
+      }
+    }
+  }
+
+  tags = local.base_tags
+
+  lifecycle {
+    # The deployment controller owns the active revision and the target group
+    # traffic is currently routed to; autoscaling owns the task count.
+    ignore_changes = [task_definition, load_balancer, desired_count]
+
+    precondition {
+      condition     = var.alb_listener_arn == null
+      error_message = "Traffic-shifting rollouts route through dedicated listeners owned by the deployment module, so alb_listener_arn must be null. Pass the exported target groups to that module instead."
+    }
+  }
+
+  depends_on = [aws_lb_target_group.this, aws_lb_target_group.green]
+}
+
+locals {
+  # Exactly one service resource exists, so one() collapses the pair into the
+  # single instance without indexing into an empty list.
+  ecs_service_name = one(concat(aws_ecs_service.rolling[*].name, aws_ecs_service.blue_green[*].name))
+  ecs_service_id   = one(concat(aws_ecs_service.rolling[*].id, aws_ecs_service.blue_green[*].id))
+}
+
 # --- Autoscaling --------------------------------------------------------------
 
 resource "aws_appautoscaling_target" "this" {
   service_namespace  = "ecs"
-  resource_id        = "service/${var.cluster_name}/${aws_ecs_service.this.name}"
+  resource_id        = "service/${var.cluster_name}/${local.ecs_service_name}"
   scalable_dimension = "ecs:service:DesiredCount"
   min_capacity       = var.min_capacity
   max_capacity       = var.max_capacity
